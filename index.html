@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sprite Grid Arranger</title>
+<style>
+  :root {
+    --bg: #17181b;
+    --panel: #21232a;
+    --accent: #ffd400;
+    --text: #e7ebf0;
+    --muted: #9aa4b2;
+    --border: #2c2f37;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, "Helvetica Neue", Arial, "Noto Sans";
+    color: var(--text);
+    background: radial-gradient(1000px 600px at 10% -10%, #1a1c22 0%, var(--bg) 40%) fixed, var(--bg);
+  }
+  header {
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: .2px; }
+  .row { display: flex; gap: 14px; padding: 14px; height: calc(100dvh - 72px); }
+  .col {
+    flex: 1 1 0; min-width: 0;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    display: grid; grid-template-rows: auto 1fr auto; overflow: hidden;
+  }
+  .col header { background: transparent; border: 0; padding: 10px 12px; }
+  .title { font-size: 14px; color: var(--muted); }
+  .surface {
+    position: relative; overflow: auto;
+    background: conic-gradient(#24262d 25%, #272a31 0 50%, #24262d 0 75%, #272a31 0) 0 0 / 16px 16px;
+    border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  }
+  canvas {
+    display: block; image-rendering: pixelated; image-rendering: crisp-edges; margin: 0;
+  }
+  .stack { position: relative; display: inline-block; }
+  .overlay { position: absolute; inset: 0; pointer-events: none; }
+  .controls { padding: 10px 12px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px 12px; }
+  .spacer { flex: 1; }
+  .btn, label.button {
+    appearance: none; background: #2c2f37; color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer;
+  }
+  .btn:hover, label.button:hover { background: #333844; }
+  .danger { background: #3a2225; border-color: #4a2a2e; }
+  .danger:hover { background: #44282c; }
+  input[type="range"] { width: 160px; }
+  .badge {
+    font-variant-numeric: tabular-nums; padding: 3px 8px; border: 1px solid var(--border);
+    border-radius: 999px; color: var(--text); background: #2a2e35; font-size: 12px;
+  }
+  #dropHint { color: var(--muted); font-size: 13px; }
+  input[type=file] { position: absolute; left: -9999px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Sprite Grid Arranger</h1>
+    <div class="spacer"></div>
+    <span id="status" class="badge">Load or paste an image…</span>
+  </header>
+
+  <div class="row">
+    <!-- LEFT: Source -->
+    <section class="col" id="leftCol">
+      <header><div class="title">Source (paste here or choose file)</div></header>
+      <div class="surface" id="sourceSurface" tabindex="0" title="Click this panel, then Ctrl/Cmd+V to paste. You can also pick a file.">
+        <div class="stack" id="sourceStack">
+          <canvas id="sourceCanvas" width="1" height="1"></canvas>
+        </div>
+      </div>
+      <div class="controls">
+        <label class="button" for="fileInput">Choose Image…</label>
+        <input id="fileInput" type="file" accept="image/*" />
+        <span id="dropHint">or press <kbd>Ctrl/Cmd+V</kbd> to paste</span>
+      </div>
+    </section>
+
+    <!-- RIGHT: Edited -->
+    <section class="col">
+      <header><div class="title">Edited Copy (with grid & selection)</div></header>
+      <div class="surface">
+        <div class="stack" id="editStack">
+          <canvas id="editCanvas" width="1" height="1"></canvas>
+          <canvas id="overlayCanvas" class="overlay" width="1" height="1"></canvas>
+        </div>
+      </div>
+      <div class="controls">
+        <label>Grid:
+          <input id="gridSlider" type="range" min="4" max="64" step="1" value="16">
+        </label>
+        <span class="badge"><span id="gridVal">16</span> px</span>
+
+        <label style="margin-left:16px;">Scale:
+          <input id="scaleSlider" type="range" min="1" max="16" step="1" value="4">
+        </label>
+        <span class="badge"><span id="scaleVal">4×</span></span>
+
+        <button id="addCellBtn" class="btn" style="margin-left:16px;">Add 1 grid cell (↘︎)</button>
+
+        <div class="spacer"></div>
+        <button id="copyBtn" class="btn">Copy to Clipboard</button>
+        <button id="saveBtn" class="btn">Download PNG</button>
+        <button id="undoBtn" class="btn danger">Undo All Changes</button>
+      </div>
+    </section>
+  </div>
+
+<script>
+(() => {
+  const sourceCanvas = document.getElementById('sourceCanvas');
+  const sourceCtx = sourceCanvas.getContext('2d');
+
+  const editCanvas = document.getElementById('editCanvas');
+  const editCtx = editCanvas.getContext('2d', { willReadFrequently: true });
+  editCtx.imageSmoothingEnabled = false;
+
+  const overlayCanvas = document.getElementById('overlayCanvas');
+  const overlayCtx = overlayCanvas.getContext('2d');
+
+  const statusEl = document.getElementById('status');
+  const gridSlider = document.getElementById('gridSlider');
+  const gridVal = document.getElementById('gridVal');
+  const scaleSlider = document.getElementById('scaleSlider');
+  const scaleVal = document.getElementById('scaleVal');
+  const addCellBtn = document.getElementById('addCellBtn');
+  const fileInput = document.getElementById('fileInput');
+  const sourceSurface = document.getElementById('sourceSurface');
+
+  const copyBtn = document.getElementById('copyBtn');
+  const saveBtn = document.getElementById('saveBtn');
+  const undoBtn = document.getElementById('undoBtn');
+
+  let viewScale = 4; // on-screen scale (1..16)
+
+  // Store original (for Undo All) — includes size now
+  let originalRightImageData = null;
+  let originalSize = { w: 0, h: 0 };
+
+  // Selection state
+  let state = 'idle'; // 'idle' | 'selecting' | 'floating'
+  let sel = { x:0, y:0, w:0, h:0 };          // base-pixel units
+  let startPt = { x:0, y:0 };                 // base-pixel units
+  let mouse = { x:0, y:0 };                   // base-pixel units
+
+  // Floating selection payload
+  let floatSel = null; /* { canvas, w,h, originX,originY, mouseUpX,mouseUpY } */
+  let suppressNextClick = false;
+
+  function setStatus(msg) { statusEl.textContent = msg; }
+
+  function applyViewScale() {
+    const w = editCanvas.width, h = editCanvas.height;
+    const sw = Math.max(0, w * viewScale);
+    const sh = Math.max(0, h * viewScale);
+    editCanvas.style.width = sw + 'px';
+    editCanvas.style.height = sh + 'px';
+    overlayCanvas.style.width = sw + 'px';
+    overlayCanvas.style.height = sh + 'px';
+  }
+
+  function resizeSourceTo(w, h) {
+    sourceCanvas.width = w; sourceCanvas.height = h;
+    sourceCanvas.style.width = w + 'px';
+    sourceCanvas.style.height = h + 'px';
+  }
+
+  function resizeEditTo(w, h) {
+    // Changing a canvas size clears it; preserve edit pixels
+    const tmp = document.createElement('canvas');
+    tmp.width = Math.max(1, w);
+    tmp.height = Math.max(1, h);
+    const tctx = tmp.getContext('2d');
+    tctx.imageSmoothingEnabled = false;
+    // draw old content at (0,0)
+    tctx.drawImage(editCanvas, 0, 0);
+
+    // resize real canvases
+    editCanvas.width = w; editCanvas.height = h;
+    overlayCanvas.width = w; overlayCanvas.height = h;
+
+    // restore preserved pixels
+    editCtx.clearRect(0,0,w,h);
+    editCtx.drawImage(tmp, 0, 0);
+
+    applyViewScale();
+    renderOverlay();
+  }
+
+  function loadImageFromBlob(blob) {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      // Source (1:1)
+      resizeSourceTo(img.naturalWidth, img.naturalHeight);
+      sourceCtx.clearRect(0,0,sourceCanvas.width, sourceCanvas.height);
+      sourceCtx.drawImage(img, 0, 0);
+
+      // Edited (same base size)
+      editCanvas.width = img.naturalWidth;
+      editCanvas.height = img.naturalHeight;
+      overlayCanvas.width = img.naturalWidth;
+      overlayCanvas.height = img.naturalHeight;
+      editCtx.clearRect(0,0,editCanvas.width, editCanvas.height);
+      editCtx.drawImage(img, 0, 0);
+
+      // Save original for Undo (pixels + size)
+      originalRightImageData = editCtx.getImageData(0,0,editCanvas.width, editCanvas.height);
+      originalSize = { w: editCanvas.width, h: editCanvas.height };
+
+      // Reset UI state
+      state = 'idle'; floatSel = null; sel = {x:0,y:0,w:0,h:0};
+      applyViewScale();
+      renderOverlay();
+      setStatus('Image loaded. Create a selection on the right.');
+
+      URL.revokeObjectURL(url);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); setStatus('Failed to load image.'); };
+    img.decoding = 'async';
+    img.src = url;
+  }
+
+  // File picker
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) loadImageFromBlob(file);
+    fileInput.value = '';
+  });
+
+  // Paste
+  document.addEventListener('paste', (e) => {
+    if (!e.clipboardData) return;
+    const items = [...e.clipboardData.items];
+    const imgItem = items.find(it => it.type && it.type.startsWith('image/'));
+    if (imgItem) {
+      const file = imgItem.getAsFile();
+      if (file) { loadImageFromBlob(file); e.preventDefault(); }
+    }
+  });
+
+  // Pointer -> BASE pixels, snapped to viewScale increments (screen)
+  function canvasPointFromEventSnapped(e, canvas) {
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const snappedSx = Math.round(sx / viewScale) * viewScale;
+    const snappedSy = Math.round(sy / viewScale) * viewScale;
+    const x = Math.floor(snappedSx / viewScale);
+    const y = Math.floor(snappedSy / viewScale);
+    return { x, y };
+  }
+
+  function renderOverlay() {
+    overlayCtx.clearRect(0,0,overlayCanvas.width, overlayCanvas.height);
+
+    // Floating preview
+    if (state === 'floating' && floatSel) {
+      const dx = mouse.x - floatSel.mouseUpX;
+      const dy = mouse.y - floatSel.mouseUpY;
+      const px = floatSel.originX + dx;
+      const py = floatSel.originY + dy;
+      overlayCtx.save();
+      overlayCtx.imageSmoothingEnabled = false;
+      overlayCtx.drawImage(floatSel.canvas, Math.floor(px), Math.floor(py));
+      overlayCtx.restore();
+    }
+
+    // Selection rect
+    if (state === 'selecting') {
+      overlayCtx.save();
+      overlayCtx.strokeStyle = 'rgba(255, 212, 0, 0.9)';
+      overlayCtx.setLineDash([6, 4]);
+      overlayCtx.lineWidth = 1;
+      const {x,y,w,h} = sel;
+      overlayCtx.strokeRect(Math.floor(x)+0.5, Math.floor(y)+0.5, Math.floor(w), Math.floor(h));
+      overlayCtx.restore();
+    }
+
+    // Grid
+    const g = parseInt(gridSlider.value, 10) || 16;
+    overlayCtx.save();
+    overlayCtx.strokeStyle = 'rgba(255, 212, 0, 0.35)';
+    overlayCtx.lineWidth = 1;
+    for (let x = g; x < overlayCanvas.width; x += g) {
+      overlayCtx.beginPath();
+      overlayCtx.moveTo(Math.floor(x) + 0.5, 0);
+      overlayCtx.lineTo(Math.floor(x) + 0.5, overlayCanvas.height);
+      overlayCtx.stroke();
+    }
+    for (let y = g; y < overlayCanvas.height; y += g) {
+      overlayCtx.beginPath();
+      overlayCtx.moveTo(0, Math.floor(y) + 0.5);
+      overlayCtx.lineTo(overlayCanvas.width, Math.floor(y) + 0.5);
+      overlayCtx.stroke();
+    }
+    overlayCtx.restore();
+  }
+
+  function normalizeRect(a, b) {
+    const x = Math.min(a.x, b.x);
+    const y = Math.min(a.y, b.y);
+    const w = Math.abs(b.x - a.x);
+    const h = Math.abs(b.y - a.y);
+    return { x, y, w, h };
+  }
+
+  // Mouse interactions on EDIT canvas
+  editCanvas.addEventListener('mousedown', (e) => {
+    const pt = canvasPointFromEventSnapped(e, editCanvas);
+    mouse = pt;
+
+    if (state === 'floating' && floatSel) {
+      const dx = pt.x - floatSel.mouseUpX;
+      const dy = pt.y - floatSel.mouseUpY;
+      const px = floatSel.originX + dx;
+      const py = floatSel.originY + dy;
+      editCtx.save();
+      editCtx.imageSmoothingEnabled = false;
+      editCtx.drawImage(floatSel.canvas, Math.floor(px), Math.floor(py));
+      editCtx.restore();
+      floatSel = null; state = 'idle';
+      renderOverlay(); setStatus('Pasted selection.');
+      return;
+    }
+
+    state = 'selecting';
+    startPt = pt;
+    sel = { x: pt.x, y: pt.y, w: 0, h: 0 };
+    renderOverlay();
+  });
+
+  editCanvas.addEventListener('mousemove', (e) => {
+    const pt = canvasPointFromEventSnapped(e, editCanvas);
+    mouse = pt;
+    if (state === 'selecting') {
+      sel = normalizeRect(startPt, pt);
+      renderOverlay();
+    } else if (state === 'floating') {
+      renderOverlay();
+    }
+  });
+
+  editCanvas.addEventListener('mouseup', (e) => {
+    const pt = canvasPointFromEventSnapped(e, editCanvas);
+    mouse = pt;
+
+    if (state === 'selecting') {
+      sel = normalizeRect(startPt, pt);
+      if (sel.w > 0 && sel.h > 0) {
+        const tmp = document.createElement('canvas');
+        tmp.width = sel.w; tmp.height = sel.h;
+        const tctx = tmp.getContext('2d');
+        tctx.imageSmoothingEnabled = false;
+        tctx.drawImage(editCanvas, sel.x, sel.y, sel.w, sel.h, 0, 0, sel.w, sel.h);
+        editCtx.clearRect(sel.x, sel.y, sel.w, sel.h);
+
+        floatSel = {
+          canvas: tmp, w: sel.w, h: sel.h,
+          originX: sel.x, originY: sel.y,
+          mouseUpX: pt.x, mouseUpY: pt.y
+        };
+        state = 'floating'; suppressNextClick = true;
+        setStatus('Selection cut. Move mouse, click to paste.');
+      } else {
+        state = 'idle';
+      }
+      renderOverlay();
+    }
+  });
+
+  editCanvas.addEventListener('click', () => {
+    if (suppressNextClick) suppressNextClick = false;
+  });
+
+  // Esc cancels floating (restores to origin)
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && state === 'floating' && floatSel) {
+      editCtx.drawImage(floatSel.canvas, floatSel.originX, floatSel.originY);
+      floatSel = null; state = 'idle';
+      renderOverlay(); setStatus('Selection canceled.');
+    }
+  });
+
+  // Grid control
+  gridSlider.addEventListener('input', () => {
+    gridVal.textContent = gridSlider.value;
+    renderOverlay();
+  });
+
+  // Scale control
+  scaleSlider.addEventListener('input', () => {
+    viewScale = parseInt(scaleSlider.value, 10) || 1;
+    scaleVal.textContent = viewScale + '×';
+    applyViewScale();
+    renderOverlay();
+    setStatus('View scale: ' + viewScale + '×');
+  });
+
+  // NEW: Add 1 grid cell (↘︎) – increases both width & height by current grid size
+  addCellBtn.addEventListener('click', () => {
+    if (editCanvas.width === 0 || editCanvas.height === 0) return;
+    const g = parseInt(gridSlider.value, 10) || 16;
+    const newW = editCanvas.width + g;
+    const newH = editCanvas.height + g;
+    resizeEditTo(newW, newH);
+    setStatus(`Expanded canvas by ${g}px → ${newW}×${newH}`);
+  });
+
+  // Copy to clipboard (base resolution)
+  copyBtn.addEventListener('click', () => {
+    if (editCanvas.width === 0 || editCanvas.height === 0) return;
+    editCanvas.toBlob(async (blob) => {
+      if (!blob) return;
+      try {
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        setStatus('Copied image to clipboard.');
+      } catch (err) {
+        try {
+          const dataURL = await new Promise(res => {
+            const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob);
+          });
+          await navigator.clipboard.writeText(dataURL);
+          setStatus('Copied Data URL to clipboard (image clipboard not available).');
+        } catch (err2) {
+          setStatus('Clipboard copy failed: ' + (err2.message || err2));
+        }
+      }
+    }, 'image/png');
+  });
+
+  // Download (base resolution)
+  saveBtn.addEventListener('click', () => {
+    if (editCanvas.width === 0 || editCanvas.height === 0) return;
+    editCanvas.toBlob((blob) => {
+      if (!blob) return;
+      const a = document.createElement('a');
+      a.download = 'edited.png';
+      a.href = URL.createObjectURL(blob);
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+      setStatus('Downloaded edited.png');
+    }, 'image/png');
+  });
+
+  // Undo all (now restores size + pixels)
+  undoBtn.addEventListener('click', () => {
+    if (!originalRightImageData) return;
+    // Resize back to original size first
+    resizeEditTo(originalSize.w, originalSize.h);
+    editCtx.putImageData(originalRightImageData, 0, 0);
+    floatSel = null; state = 'idle';
+    renderOverlay();
+    setStatus('All changes undone.');
+  });
+
+  // Drag+drop to Source
+  sourceSurface.addEventListener('dragover', (e) => { e.preventDefault(); });
+  sourceSurface.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file && file.type.startsWith('image/')) { loadImageFromBlob(file); }
+  });
+
+  // Init
+  sourceCanvas.width = sourceCanvas.height = 0;
+  editCanvas.width = editCanvas.height = 0;
+  overlayCanvas.width = overlayCanvas.height = 0;
+  applyViewScale();
+  renderOverlay();
+})();
+</script>
+</body>
+</html>
+
